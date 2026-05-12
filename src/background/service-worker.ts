@@ -1,20 +1,78 @@
-// MV3 service worker. Two smoke-check listeners for the scaffold:
-//   - onInstalled fires once per install/update so the install log
-//     surfaces the moment the extension is loaded unpacked.
-//   - onUpdated fires every time a tab transitions through any state
-//     (loading, complete, title change). We log only when the URL is
-//     present so the noisy in-progress events stay quiet.
+import { classifyUrl, extractHostname } from "../lib/classify.ts";
+import {
+  defaultUserConfig,
+  loadConfig,
+  saveConfig,
+  USER_CONFIG_STORAGE_KEY,
+} from "../lib/config.ts";
 
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("Nihlus service worker installed");
+// MV3 service worker. Responsibilities for Phase 2:
+//   1. Backfill the default UserConfig on first install so the popup
+//      always opens against a real object, not an empty storage row.
+//   2. On every tab URL transition, classify the URL against the user's
+//      current allow/block lists and console.log the decision. The
+//      Phase 3 banter layer will subscribe here later; for now the log
+//      is the only visible effect.
+
+chrome.runtime.onInstalled.addListener((details) => {
+  console.log("Nihlus service worker installed", details.reason);
+  void ensureDefaultConfig();
 });
 
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
-  if (changeInfo.url !== undefined) {
-    console.log("Nihlus tab updated:", changeInfo.url);
+  // Two events fire per navigation: changeInfo.url on the navigation
+  // commit, and changeInfo.status === "complete" when the page has
+  // finished loading. Classify on either signal, but only once per
+  // URL transition.
+  const url = pickUrl(changeInfo, tab);
+  if (url === null) return;
+  void classifyAndLog(url);
+});
+
+async function ensureDefaultConfig(): Promise<void> {
+  try {
+    const result = await chrome.storage.local.get(USER_CONFIG_STORAGE_KEY);
+    if (result[USER_CONFIG_STORAGE_KEY] !== undefined) return;
+    await saveConfig(defaultUserConfig());
+    console.log("Nihlus wrote default UserConfig on first install");
+  } catch (err) {
+    console.warn("Nihlus ensureDefaultConfig failed:", err);
+  }
+}
+
+async function classifyAndLog(url: string): Promise<void> {
+  const hostname = extractHostname(url);
+  if (hostname === null) return;
+
+  const config = await loadConfig();
+  const decision = classifyUrl(config, url);
+
+  if (decision.verdict === "distracting") {
+    const reason = decision.matchedEntry !== null
+      ? `matched blocked entry "${decision.matchedEntry}"`
+      : `not on allow list (whitelist mode)`;
+    console.log(`Nihlus would intervene here: ${url}  (${reason})`);
     return;
   }
-  if (tab.url !== undefined && changeInfo.status === "complete") {
-    console.log("Nihlus tab updated:", tab.url);
+  if (decision.verdict === "allowed") {
+    console.log(`Nihlus allowed ${hostname} (matched "${decision.matchedEntry ?? ""}")`);
+    return;
   }
-});
+  // Neutral: focus mode off, internal URL, or no list opinion. Log at
+  // debug volume so Wyatt can verify the listener fires without
+  // drowning the console.
+  if (config.focusModeActive) {
+    console.debug(`Nihlus neutral: ${hostname} (no list match, blacklist mode)`);
+  }
+}
+
+function pickUrl(
+  changeInfo: chrome.tabs.TabChangeInfo,
+  tab: chrome.tabs.Tab,
+): string | null {
+  if (changeInfo.url !== undefined) return changeInfo.url;
+  if (changeInfo.status === "complete" && typeof tab.url === "string") {
+    return tab.url;
+  }
+  return null;
+}
