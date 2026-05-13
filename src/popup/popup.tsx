@@ -1,10 +1,12 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  CLAUDE_MODEL_OPTIONS,
   defaultUserConfig,
   loadConfig,
   saveConfig,
   subscribeConfig,
+  type ClaudeModelId,
   type UserConfig,
 } from "../lib/config.ts";
 import "./popup.css";
@@ -72,6 +74,24 @@ function Popup(): React.ReactElement {
 
   const handleBlockedChange = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
     setBlockedText(e.target.value);
+    markDirty();
+  };
+
+  const handleAiToggle = (): void => {
+    setConfig((prev) => ({ ...prev, aiBanterEnabled: !prev.aiBanterEnabled }));
+    markDirty();
+  };
+
+  const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    // The select only renders options from CLAUDE_MODEL_OPTIONS, so the
+    // narrow is sound: e.target.value is always a member of the union.
+    const v = e.target.value as ClaudeModelId;
+    setConfig((prev) => ({ ...prev, claudeModel: v }));
+    markDirty();
+  };
+
+  const handleApiKeyChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    setConfig((prev) => ({ ...prev, claudeApiKey: e.target.value }));
     markDirty();
   };
 
@@ -158,6 +178,59 @@ function Popup(): React.ReactElement {
           value={blockedText}
           onChange={handleBlockedChange}
           placeholder={"youtube.com\nreddit.com"}
+          disabled={!loaded}
+        />
+      </section>
+
+      <hr className="nihlus-popup__divider" />
+
+      <section className="nihlus-popup__row">
+        <label className="nihlus-popup__toggle">
+          <input
+            type="checkbox"
+            checked={config.aiBanterEnabled}
+            onChange={handleAiToggle}
+            disabled={!loaded}
+          />
+          <span>AI banter (Claude)</span>
+        </label>
+      </section>
+
+      <section className="nihlus-popup__field">
+        <label htmlFor="model" className="nihlus-popup__label">
+          Model
+        </label>
+        <select
+          id="model"
+          value={config.claudeModel}
+          onChange={handleModelChange}
+          disabled={!loaded}
+        >
+          {CLAUDE_MODEL_OPTIONS.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      </section>
+
+      <section className="nihlus-popup__field">
+        <label htmlFor="apikey" className="nihlus-popup__label">
+          Anthropic API key{" "}
+          <span className="nihlus-popup__hint">
+            {config.aiBanterEnabled && config.claudeApiKey.length === 0
+              ? "(required for AI banter)"
+              : "(stored locally only)"}
+          </span>
+        </label>
+        <input
+          id="apikey"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={config.claudeApiKey}
+          onChange={handleApiKeyChange}
+          placeholder="sk-ant-..."
           disabled={!loaded}
         />
       </section>

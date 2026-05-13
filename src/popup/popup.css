@@ -116,3 +116,24 @@ body {
   color: #9ca3af;
   cursor: default;
 }
+
+.nihlus-popup__divider {
+  border: none;
+  border-top: 1px solid #2a313c;
+  margin: 6px 0 12px;
+}
+
+.nihlus-popup__field select {
+  background: #161a21;
+  color: #e6e6e6;
+  border: 1px solid #2a313c;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.nihlus-popup__field select:focus {
+  outline: none;
+  border-color: #6ea8ff;
+}

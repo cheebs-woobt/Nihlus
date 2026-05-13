@@ -5,34 +5,43 @@ import {
   loadConfig,
   saveConfig,
   USER_CONFIG_STORAGE_KEY,
+  type UserConfig,
 } from "../lib/config.ts";
+import {
+  deriveTimeOfDay,
+  generateBanter,
+  type BanterContext,
+  type GenerateBanterResult,
+} from "../lib/llm.ts";
 import {
   isBanterDismissedMessage,
   type ShowBanterMessage,
 } from "../lib/messages.ts";
-import { incrementDismissals } from "../lib/session-state.ts";
+import {
+  getSessionState,
+  incrementDismissals,
+} from "../lib/session-state.ts";
 
-// MV3 service worker. Responsibilities for Phase 3:
-//   1. Backfill the default UserConfig on first install (Phase 2).
-//   2. On every tab URL transition, classify the URL and console.log
-//      the decision (Phase 2).
-//   3. NEW: when a navigation completes on a distracting URL, send a
-//      ShowBanterMessage to the tab's content script unless that tab
-//      is inside its 30-second dismissal cooldown or has already had
-//      banter shown for the same URL this nav.
-//   4. NEW: receive BanterDismissedMessage from the content script,
-//      arm the per-tab cooldown, and increment sessionDismissals.
+// MV3 service worker. Phase 4 responsibilities (additive over Phase 3):
+//   - When aiBanterEnabled is true and an API key is set, generateBanter
+//     is the primary picker. On any failure (no key, auth, rate-limit,
+//     network, malformed, empty) the worker falls back silently to the
+//     static pool and logs the reason at warn level (never the key).
+//   - The last 3 AI-generated banters are passed back into the next
+//     call so the model can avoid repeating itself.
+//   - The dismissed-banter handler additionally pushes the hostname
+//     into sessionState.recentlyDismissedSites for the next prompt.
 
-// Per-tab cooldown: a dismissal silences banter on this tab for
-// COOLDOWN_MS. In-memory because the cooldown is session-scoped and
-// tab IDs are not stable across browser restarts anyway.
 const COOLDOWN_MS = 30_000;
-const tabCooldownExpiresAt = new Map<number, number>();
+const RECENT_BANTER_CACHE = 3;
 
-// Dedupe: avoid re-showing banter when a tab fires "complete" twice
-// for the same URL (e.g. iframe loads, SPA route changes that touch
-// onUpdated). Cleared on tab removal so we don't accumulate.
+const tabCooldownExpiresAt = new Map<number, number>();
 const lastBanterUrlByTab = new Map<number, string>();
+
+// Rolling cache of the most recent AI-generated banter strings. Held
+// here (not in storage) because rotation is session-scope and the
+// service worker tear-down naturally resets it.
+const recentAiBanters: string[] = [];
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("Nihlus service worker installed", details.reason);
@@ -44,9 +53,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (url !== null) {
     void classifyAndLog(url);
   }
-  // Banter only fires on "complete" so the content script has had a
-  // chance to inject. URL-only events (the early commit signal) are
-  // logged above but don't trigger overlays.
   if (changeInfo.status !== "complete") return;
   const finalUrl = typeof tab.url === "string" ? tab.url : url;
   if (finalUrl === null) return;
@@ -64,9 +70,15 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (tabId !== undefined) {
     tabCooldownExpiresAt.set(tabId, Date.now() + COOLDOWN_MS);
   }
-  void incrementDismissals().then((state) => {
+  // Resolve the hostname the user was on when they dismissed so the
+  // next AI prompt can call back to a pattern. lastBanterUrlByTab is
+  // the URL we displayed banter for; falls back to null silently.
+  const url = tabId !== undefined ? lastBanterUrlByTab.get(tabId) ?? null : null;
+  const hostname = url !== null ? extractHostname(url) : null;
+  void incrementDismissals(hostname).then((state) => {
     console.log(
-      `Nihlus banter dismissed (id ${message.banterId}). Session dismissals today: ${state.sessionDismissals}`,
+      `Nihlus banter dismissed (id ${message.banterId}). Today: ${state.sessionDismissals} dismissals, ` +
+        `recent sites: ${state.recentlyDismissedSites.slice(0, 3).join(", ") || "(none)"}`,
     );
   });
 });
@@ -110,37 +122,83 @@ async function maybeSendBanter(tabId: number, url: string): Promise<void> {
   const hostname = extractHostname(url);
   if (hostname === null) return;
 
-  // Dismissal cooldown.
   const cooldownExpiry = tabCooldownExpiresAt.get(tabId) ?? 0;
   if (Date.now() < cooldownExpiry) {
     console.debug(`Nihlus banter suppressed: tab ${tabId} cooldown active`);
     return;
   }
-
-  // Dedupe same-URL re-fires within the same tab.
   if (lastBanterUrlByTab.get(tabId) === url) return;
 
   const config = await loadConfig();
   const decision = classifyUrl(config, url);
   if (decision.verdict !== "distracting") return;
 
-  const pick = pickBanter();
+  const { message, banterId, source } = await pickAnyBanter(config, url);
   lastBanterUrlByTab.set(tabId, url);
 
-  const message: ShowBanterMessage = {
+  const out: ShowBanterMessage = {
     type: "nihlus/show-banter",
-    message: pick.message,
-    banterId: pick.id,
+    message,
+    banterId,
   };
 
   try {
-    await chrome.tabs.sendMessage(tabId, message);
+    await chrome.tabs.sendMessage(tabId, out);
+    console.debug(`Nihlus sent ${source} banter (id ${banterId}) to tab ${tabId}`);
   } catch (err) {
-    // Common: the page rejected the content script (chrome://, the
-    // web store, PDF viewer, sandboxed iframe) so no listener is
-    // present. Quiet log so we can debug without noise.
     console.debug(`Nihlus banter send failed for tab ${tabId}:`, err);
   }
+}
+
+interface BanterChoice {
+  message: string;
+  banterId: number;
+  source: "ai" | "static";
+}
+
+// Decides between AI-generated and static-pool banter for the current
+// distraction. AI is primary when both aiBanterEnabled and a non-empty
+// claudeApiKey are present; any failure reason falls back silently to
+// the static pool so the user always sees some line. The AI branch
+// also rotates the recent-banter cache.
+async function pickAnyBanter(config: UserConfig, url: string): Promise<BanterChoice> {
+  if (config.aiBanterEnabled && config.claudeApiKey.length > 0) {
+    const session = await getSessionState();
+    const ctx: BanterContext = {
+      url,
+      commitmentOfTheHour: config.commitmentOfTheHour,
+      dismissalCountToday: session.sessionDismissals,
+      timeOfDay: deriveTimeOfDay(),
+      recentlyDismissedSites: session.recentlyDismissedSites,
+      recentBanters: recentAiBanters,
+    };
+    const result = await generateBanter(ctx, {
+      apiKey: config.claudeApiKey,
+      model: config.claudeModel,
+    });
+    if (result.ok) {
+      pushRecentAiBanter(result.message);
+      // AI banters share id -1: they're not pool-indexable. The id is
+      // round-tripped on dismissal for logging only, so a sentinel
+      // works.
+      return { message: result.message, banterId: -1, source: "ai" };
+    }
+    logAiFallback(result);
+  }
+  const pick = pickBanter();
+  return { message: pick.message, banterId: pick.id, source: "static" };
+}
+
+function pushRecentAiBanter(message: string): void {
+  recentAiBanters.push(message);
+  while (recentAiBanters.length > RECENT_BANTER_CACHE) {
+    recentAiBanters.shift();
+  }
+}
+
+function logAiFallback(result: GenerateBanterResult & { ok: false }): void {
+  // Reason is enum-safe so no key value can leak through here.
+  console.warn(`Nihlus AI banter failed (${result.reason}); using static pool.`);
 }
 
 function pickUrl(

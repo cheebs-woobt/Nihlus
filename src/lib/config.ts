@@ -4,6 +4,18 @@
 // current value, merges, and writes back so multiple panels (popup,
 // future options page) can never clobber each other's fields.
 
+// Allowed Claude model identifiers. Kept as a string-literal union so
+// the popup's <select> options and the service worker's request body
+// agree on the same set. New models extend this list; the dropdown
+// renders one option per entry. Default chosen for cost + latency.
+export const CLAUDE_MODEL_OPTIONS = [
+  "claude-haiku-4-5",
+  "claude-sonnet-4-6",
+  "claude-opus-4-7",
+] as const;
+export type ClaudeModelId = (typeof CLAUDE_MODEL_OPTIONS)[number];
+export const DEFAULT_CLAUDE_MODEL: ClaudeModelId = "claude-haiku-4-5";
+
 export interface UserConfig {
   // Master switch. When false, the service worker classifies but skips
   // any future intervention. Default false so a fresh install doesn't
@@ -23,6 +35,19 @@ export interface UserConfig {
   // the current hour. Surfaces in future banter / nudge UIs; in Phase 2
   // it is stored and round-tripped only.
   commitmentOfTheHour: string;
+  // Anthropic API key. Stored verbatim (no encryption); chrome.storage
+  // .local is sandboxed to this extension, but the popup never echoes
+  // this back into logs or error strings. Empty string = unset.
+  claudeApiKey: string;
+  // When true and claudeApiKey is non-empty, the worker calls Claude
+  // to generate banter on each distraction. On any failure (no key,
+  // 401, 429, network, malformed response) it falls back silently to
+  // the static pool.
+  aiBanterEnabled: boolean;
+  // Model used by generateBanter. Restricted to the union above so
+  // typos can't ship to the request body. Migrated to the default on
+  // load if a previously-stored value is no longer in the union.
+  claudeModel: ClaudeModelId;
 }
 
 const STORAGE_KEY = "userConfig";
@@ -33,6 +58,9 @@ export function defaultUserConfig(): UserConfig {
     allowedSites: [],
     blockedSites: [],
     commitmentOfTheHour: "",
+    claudeApiKey: "",
+    aiBanterEnabled: false,
+    claudeModel: DEFAULT_CLAUDE_MODEL,
   };
 }
 
@@ -91,7 +119,20 @@ function sanitizeConfig(raw: unknown): UserConfig {
     blockedSites: sanitizeSiteList(o["blockedSites"]),
     commitmentOfTheHour:
       typeof o["commitmentOfTheHour"] === "string" ? o["commitmentOfTheHour"] : def.commitmentOfTheHour,
+    claudeApiKey:
+      typeof o["claudeApiKey"] === "string" ? o["claudeApiKey"] : def.claudeApiKey,
+    aiBanterEnabled:
+      typeof o["aiBanterEnabled"] === "boolean" ? o["aiBanterEnabled"] : def.aiBanterEnabled,
+    claudeModel: sanitizeModelId(o["claudeModel"]),
   };
+}
+
+function sanitizeModelId(raw: unknown): ClaudeModelId {
+  if (typeof raw !== "string") return DEFAULT_CLAUDE_MODEL;
+  for (const id of CLAUDE_MODEL_OPTIONS) {
+    if (id === raw) return id;
+  }
+  return DEFAULT_CLAUDE_MODEL;
 }
 
 function sanitizeSiteList(raw: unknown): string[] {
