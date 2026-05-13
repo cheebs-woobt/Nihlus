@@ -1,25 +1,27 @@
-// Static banter pool. Phase 3 deliberately keeps these flat strings,
-// no dynamic templating, no model calls. Tone target per Wyatt's spec:
-// pointed but not preachy, named-not-shamed, designed for someone who
-// would resist a hard tool but ignore a soft one. Phase 4 swaps this
-// for an LLM-backed pool; the picker interface stays the same.
+// Static banter pool. Fires as fallback when AI banter is disabled or
+// fails. Tone per the Phase 6 follow-up calibration: direct, present,
+// declarative. No hedging tags (no "just", "maybe", "perhaps"). The
+// AI branch in service-worker.ts handles dynamic commitment quoting;
+// the static lines work without specific commitment context but still
+// name what the user did. 14 of 15 are declarative (line 8 is the one
+// pointed question, kept for variety on the confrontational tier).
 
 const BANTER_POOL: readonly string[] = [
-  "Hmm. Is this what we agreed on?",
-  "Quick check: is this the thing, or a thing-shaped escape?",
-  "Five seconds. Tab close, or genuine yes?",
-  "I noticed. That's all.",
-  "The commitment of the hour is still open in another tab.",
-  "You can rationalize this one. That's how we got here.",
-  "Calling it: this isn't the work.",
-  "Just naming the pattern. Avoidance.",
-  "If past-you saw this tab right now, what would they say?",
-  "Here on purpose, or here on reflex?",
-  "I'd be a worse extension if I didn't mention this.",
-  "Hi. Yes. I see you.",
-  "This is the soft nudge. You know what comes next.",
-  "Two minutes here becomes twenty. You already know this.",
-  "The plan didn't include this site. Just an observation.",
+  "YouTube. Right. The plan didn't include this.",
+  "You committed to something else this morning. This is not it.",
+  "Three dismissals in twenty minutes. Be real with yourself.",
+  "Close the tab. You know.",
+  "Twenty minutes here. You set the rules. You broke them.",
+  "You opened this and you knew.",
+  "The plan didn't include this site. You know what to do.",
+  "Back here again. What are you actually avoiding?",
+  "This isn't the work. You decided it wasn't this morning.",
+  "Stop. Go finish the thing you opened first.",
+  "You're not relaxing. You're escaping.",
+  "Forty minutes lost. The plan is waiting.",
+  "Pattern noted: every time it gets hard, you come here.",
+  "This is the third tab today. The work is over there.",
+  "You set a deadline this morning. This page isn't helping you hit it.",
 ];
 
 export interface BanterPick {
