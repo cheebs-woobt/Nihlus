@@ -3,7 +3,7 @@
   "name": "Nihlus",
   "description": "AI focus extension that adapts to people who'd ignore a soft tool but resist a hard one. Designed for high-functioning procrastinators.",
   "version": "0.0.1",
-  "permissions": ["tabs", "storage", "activeTab"],
+  "permissions": ["tabs", "storage", "activeTab", "alarms"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "src/popup/popup.html",
@@ -18,6 +18,12 @@
       "matches": ["<all_urls>"],
       "js": ["src/content/content-script.ts"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/interrupt/interrupt.html"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

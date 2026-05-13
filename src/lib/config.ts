@@ -53,7 +53,51 @@ export interface UserConfig {
   // too. Default true per Wyatt's calibration: appearance should
   // notice. Toggle in the popup.
   overlaySoundEnabled: boolean;
+  // Phase 6 star-level system. starLevel is a fractional number so
+  // small escalations (+0.25 for a distraction visit, +0.5 for a
+  // dismiss) can accumulate without overshooting. Math.floor of the
+  // value is what drives behavior dispatch and star rendering.
+  // Clamped on every adjustStarLevel call to [starMinimum, starMaximum].
+  starLevel: number;
+  // User-controlled floor. Even after a full clean-focus decay the
+  // worker will not drop below this. Slider in advanced popup.
+  starMinimum: number;
+  // User-controlled ceiling. 5 and 6 are gated behind a warning in the
+  // popup because they introduce tab closures + temporary blocks.
+  starMaximum: number;
+  // Last-N adjustment log. Used by the popup's debug view and by the
+  // dismiss-pattern + clean-focus triggers (they read recent timestamps
+  // to decide whether to escalate / decay). FIFO capped at 50 entries.
+  escalationEvents: EscalationEvent[];
+  // Auto-applied hostname blocks added when a level-5/6 close fires.
+  // Each entry has its own expiresAt (Unix ms); classifyUrl filters
+  // expired entries on read so the popup never has to garbage-collect
+  // them. Empty list when no auto-blocks are active.
+  temporaryBlacklist: TemporaryBlock[];
 }
+
+export interface EscalationEvent {
+  // Unix ms when the adjustStarLevel call landed.
+  timestamp: number;
+  // Signed delta applied. Positive = escalation, negative = de-escalation.
+  delta: number;
+  // Short reason tag matching the trigger names in the spec:
+  // "dismiss" | "distraction-visit" | "rapid-reopen" | "dismiss-pattern"
+  // | "clean-focus" | "commitment-complete" | "manual-reset"
+  // | "manual-set". Stored as plain string to avoid a future-edit
+  // schema migration.
+  reason: string;
+}
+
+export interface TemporaryBlock {
+  hostname: string;
+  // Unix ms after which classifyUrl ignores this entry.
+  expiresAt: number;
+}
+
+export const STAR_LEVEL_FLOOR = 0;
+export const STAR_LEVEL_CEILING = 6;
+export const MAX_ESCALATION_EVENTS = 50;
 
 const STORAGE_KEY = "userConfig";
 
@@ -67,6 +111,11 @@ export function defaultUserConfig(): UserConfig {
     aiBanterEnabled: false,
     claudeModel: DEFAULT_CLAUDE_MODEL,
     overlaySoundEnabled: true,
+    starLevel: 1,
+    starMinimum: 1,
+    starMaximum: 4,
+    escalationEvents: [],
+    temporaryBlacklist: [],
   };
 }
 
@@ -134,7 +183,58 @@ function sanitizeConfig(raw: unknown): UserConfig {
       typeof o["overlaySoundEnabled"] === "boolean"
         ? o["overlaySoundEnabled"]
         : def.overlaySoundEnabled,
+    starLevel: clampNumber(o["starLevel"], STAR_LEVEL_FLOOR, STAR_LEVEL_CEILING, def.starLevel),
+    starMinimum: clampInt(o["starMinimum"], STAR_LEVEL_FLOOR, 3, def.starMinimum),
+    starMaximum: clampInt(o["starMaximum"], 1, STAR_LEVEL_CEILING, def.starMaximum),
+    escalationEvents: sanitizeEscalationEvents(o["escalationEvents"]),
+    temporaryBlacklist: sanitizeTempBlacklist(o["temporaryBlacklist"]),
   };
+}
+
+function clampNumber(raw: unknown, lo: number, hi: number, fallback: number): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.max(lo, Math.min(hi, raw));
+}
+
+function clampInt(raw: unknown, lo: number, hi: number, fallback: number): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.max(lo, Math.min(hi, Math.floor(raw)));
+}
+
+function sanitizeEscalationEvents(raw: unknown): EscalationEvent[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EscalationEvent[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    if (typeof r["timestamp"] !== "number" || !Number.isFinite(r["timestamp"])) continue;
+    if (typeof r["delta"] !== "number" || !Number.isFinite(r["delta"])) continue;
+    if (typeof r["reason"] !== "string") continue;
+    out.push({
+      timestamp: r["timestamp"],
+      delta: r["delta"],
+      reason: r["reason"],
+    });
+    if (out.length >= MAX_ESCALATION_EVENTS) break;
+  }
+  return out;
+}
+
+function sanitizeTempBlacklist(raw: unknown): TemporaryBlock[] {
+  if (!Array.isArray(raw)) return [];
+  const out: TemporaryBlock[] = [];
+  const now = Date.now();
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    if (typeof r["hostname"] !== "string") continue;
+    if (typeof r["expiresAt"] !== "number" || !Number.isFinite(r["expiresAt"])) continue;
+    // Drop already-expired entries on the read path so the stored list
+    // doesn't grow without bound across long sessions.
+    if (r["expiresAt"] <= now) continue;
+    out.push({ hostname: r["hostname"], expiresAt: r["expiresAt"] });
+  }
+  return out;
 }
 
 function sanitizeModelId(raw: unknown): ClaudeModelId {

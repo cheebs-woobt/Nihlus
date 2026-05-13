@@ -15,13 +15,15 @@ export interface UrlDecision {
   matchedEntry: string | null;
 }
 
-// Decision policy for Phase 2:
+// Decision policy:
 //   1. Focus mode off                                          → neutral
-//   2. URL hostname matches any blockedSites entry             → distracting
-//   3. URL hostname matches any allowedSites entry             → allowed
-//   4. allowedSites is non-empty AND no allow match            → distracting
+//   2. URL hostname matches any non-expired temporaryBlacklist → distracting
+//      (Phase 6: auto-blocks from level-5/6 close actions)
+//   3. URL hostname matches any blockedSites entry             → distracting
+//   4. URL hostname matches any allowedSites entry             → allowed
+//   5. allowedSites is non-empty AND no allow match            → distracting
 //      (whitelist mode: anything not listed is off-task)
-//   5. allowedSites is empty                                   → neutral
+//   6. allowedSites is empty                                   → neutral
 //      (blacklist mode: distractions are only the blocked list)
 //
 // Blocked wins over allowed on conflict so a user accidentally listing
@@ -32,6 +34,17 @@ export function classifyUrl(config: UserConfig, url: string): UrlDecision {
 
   const hostname = extractHostname(url);
   if (hostname === null) return { verdict: "neutral", matchedEntry: null };
+
+  // Temporary auto-blocks. Filter expired on the fly; the saved list
+  // is also pruned on next loadConfig, but checking here means a
+  // freshly-expired entry can't bite while a write is in flight.
+  const now = Date.now();
+  for (const entry of config.temporaryBlacklist) {
+    if (entry.expiresAt <= now) continue;
+    if (hostname.includes(entry.hostname)) {
+      return { verdict: "distracting", matchedEntry: entry.hostname };
+    }
+  }
 
   const blockedHit = matchAny(hostname, config.blockedSites);
   if (blockedHit !== null) return { verdict: "distracting", matchedEntry: blockedHit };

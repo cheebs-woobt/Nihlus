@@ -5,6 +5,7 @@
 // access.
 
 import type { DismissReason } from "./session-state.ts";
+import type { OverlayVariant } from "./star.ts";
 
 export interface ShowBanterMessage {
   type: "nihlus/show-banter";
@@ -17,6 +18,18 @@ export interface ShowBanterMessage {
   // UserConfig.overlaySoundEnabled at send time so a config change
   // takes effect on the next banter without restarting the worker.
   soundEnabled: boolean;
+  // Phase 6: visual size tier. The worker computes this from the
+  // current star level so the content script never has to know about
+  // star arithmetic.
+  overlay: Exclude<OverlayVariant, "none">;
+  // Phase 6: remaining seconds in the close countdown. null means no
+  // countdown UI (levels 1-2). 0 means the worker is about to act
+  // immediately (levels 5-6) and the overlay should show a brief
+  // "Tab closing now" label.
+  countdownSeconds: number | null;
+  // Display-only. The overlay header includes the current floor(level)
+  // so the user knows why the visual got heavier.
+  starLevel: number;
 }
 
 export interface BanterDismissedMessage {
@@ -42,12 +55,18 @@ export type FromContentMessage = BanterDismissedMessage | RepulseFiredMessage;
 export function isShowBanterMessage(m: unknown): m is ShowBanterMessage {
   if (typeof m !== "object" || m === null) return false;
   const o = m as Record<string, unknown>;
-  return (
-    o["type"] === "nihlus/show-banter" &&
-    typeof o["message"] === "string" &&
-    typeof o["banterId"] === "number" &&
-    typeof o["soundEnabled"] === "boolean"
-  );
+  if (o["type"] !== "nihlus/show-banter") return false;
+  if (typeof o["message"] !== "string") return false;
+  if (typeof o["banterId"] !== "number") return false;
+  if (typeof o["soundEnabled"] !== "boolean") return false;
+  if (o["overlay"] !== "small" && o["overlay"] !== "standard" && o["overlay"] !== "large") {
+    return false;
+  }
+  if (o["countdownSeconds"] !== null && typeof o["countdownSeconds"] !== "number") {
+    return false;
+  }
+  if (typeof o["starLevel"] !== "number") return false;
+  return true;
 }
 
 export function isBanterDismissedMessage(m: unknown): m is BanterDismissedMessage {

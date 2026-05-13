@@ -5,10 +5,17 @@ import {
   defaultUserConfig,
   loadConfig,
   saveConfig,
+  STAR_LEVEL_CEILING,
   subscribeConfig,
   type ClaudeModelId,
   type UserConfig,
 } from "../lib/config.ts";
+import {
+  adjustStarLevel,
+  renderStarStrip,
+  setStarLevel,
+  visibleStars,
+} from "../lib/star.ts";
 import {
   countByReasonToday,
   countDismissalsToday,
@@ -92,6 +99,36 @@ function Popup(): React.ReactElement {
   const handleToggleOverlaySound = (): void => {
     setConfig((prev) => ({ ...prev, overlaySoundEnabled: !prev.overlaySoundEnabled }));
     markDirty();
+  };
+
+  const handleResetStars = async (): Promise<void> => {
+    const updated = await setStarLevel(config.starMinimum, "manual-reset");
+    setConfig(updated);
+  };
+
+  const handleCommitmentComplete = async (): Promise<void> => {
+    const updated = await adjustStarLevel(-2, "commitment-complete");
+    setConfig(updated);
+  };
+
+  const handleStarMinChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const v = Math.max(0, Math.min(3, parseInt(e.target.value, 10)));
+    setConfig((prev) => ({ ...prev, starMinimum: v }));
+    markDirty();
+  };
+
+  const handleStarMaxChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const v = Math.max(1, Math.min(STAR_LEVEL_CEILING, parseInt(e.target.value, 10)));
+    setConfig((prev) => ({ ...prev, starMaximum: v }));
+    markDirty();
+  };
+
+  const handleStartingLevelChange = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ): Promise<void> => {
+    const v = Math.max(0, Math.min(3, parseInt(e.target.value, 10)));
+    const updated = await setStarLevel(v, "manual-set");
+    setConfig(updated);
   };
 
   const handleCommitmentHourChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -178,6 +215,17 @@ function Popup(): React.ReactElement {
           {loaded ? "Configure focus" : "Loading..."}
         </p>
       </header>
+
+      <StarPanel
+        config={config}
+        loaded={loaded}
+        onReset={() => {
+          void handleResetStars();
+        }}
+        onCommitmentComplete={() => {
+          void handleCommitmentComplete();
+        }}
+      />
 
       <section className="nihlus-popup__row">
         <label className="nihlus-popup__toggle">
@@ -349,6 +397,73 @@ function Popup(): React.ReactElement {
         />
       </section>
 
+      <hr className="nihlus-popup__divider" />
+
+      <details className="nihlus-popup__advanced">
+        <summary>Advanced star settings</summary>
+        <section className="nihlus-popup__field">
+          <label htmlFor="starting-level" className="nihlus-popup__label">
+            Starting level{" "}
+            <span className="nihlus-popup__hint">
+              (force current: {visibleStars(config.starLevel)} of {STAR_LEVEL_CEILING})
+            </span>
+          </label>
+          <input
+            id="starting-level"
+            type="range"
+            min={0}
+            max={3}
+            step={1}
+            value={visibleStars(config.starLevel)}
+            onChange={(e) => {
+              void handleStartingLevelChange(e);
+            }}
+            disabled={!loaded}
+          />
+        </section>
+        <section className="nihlus-popup__field">
+          <label htmlFor="star-min" className="nihlus-popup__label">
+            Minimum level{" "}
+            <span className="nihlus-popup__hint">
+              (floor: {config.starMinimum})
+            </span>
+          </label>
+          <input
+            id="star-min"
+            type="range"
+            min={0}
+            max={3}
+            step={1}
+            value={config.starMinimum}
+            onChange={handleStarMinChange}
+            disabled={!loaded}
+          />
+        </section>
+        <section className="nihlus-popup__field">
+          <label htmlFor="star-max" className="nihlus-popup__label">
+            Maximum level{" "}
+            <span className="nihlus-popup__hint">
+              (ceiling: {config.starMaximum})
+            </span>
+          </label>
+          <input
+            id="star-max"
+            type="range"
+            min={1}
+            max={STAR_LEVEL_CEILING}
+            step={1}
+            value={config.starMaximum}
+            onChange={handleStarMaxChange}
+            disabled={!loaded}
+          />
+          {config.starMaximum >= 5 ? (
+            <p className="nihlus-popup__warning">
+              Level 5+ will close tabs and block sites temporarily.
+            </p>
+          ) : null}
+        </section>
+      </details>
+
       <footer className="nihlus-popup__footer">
         <button
           type="button"
@@ -417,6 +532,73 @@ function saveButtonLabel(state: SaveState): string {
   if (state === "saving") return "Saving...";
   if (state === "saved") return "Saved";
   return "Save";
+}
+
+interface StarPanelProps {
+  config: UserConfig;
+  loaded: boolean;
+  onReset: () => void;
+  onCommitmentComplete: () => void;
+}
+
+// Star wanted-level summary. Shows filled stars up to floor(starLevel)
+// across STAR_LEVEL_CEILING slots, the integer label, a one-line
+// explanation, and two actions: Reset (drop to floor) and Mark
+// commitment done (-2). Both actions write through the worker-side
+// adjustStarLevel so the same event log captures them.
+function StarPanel({
+  config,
+  loaded,
+  onReset,
+  onCommitmentComplete,
+}: StarPanelProps): React.ReactElement {
+  const slots = renderStarStrip(config.starLevel);
+  const visible = visibleStars(config.starLevel);
+  return (
+    <section className="nihlus-popup__star-panel">
+      <div className="nihlus-popup__star-row">
+        <div className="nihlus-popup__star-strip" aria-label={`Star level ${visible} of ${STAR_LEVEL_CEILING}`}>
+          {slots.map((filled, i) => (
+            <span
+              key={i}
+              className={
+                filled
+                  ? "nihlus-popup__star nihlus-popup__star--filled"
+                  : "nihlus-popup__star nihlus-popup__star--empty"
+              }
+            >
+              {filled ? "★" : "☆"}
+            </span>
+          ))}
+        </div>
+        <div className="nihlus-popup__star-label">
+          Star level: {visible} of {STAR_LEVEL_CEILING}
+        </div>
+      </div>
+      <p className="nihlus-popup__star-hint">
+        Adjusts to your behavior. Higher = more firm.
+      </p>
+      <div className="nihlus-popup__star-actions">
+        <button
+          type="button"
+          className="nihlus-popup__star-btn"
+          onClick={onReset}
+          disabled={!loaded}
+        >
+          Reset
+        </button>
+        <button
+          type="button"
+          className="nihlus-popup__star-btn"
+          onClick={onCommitmentComplete}
+          disabled={!loaded}
+          title="Subtracts 2 from your star level"
+        >
+          Mark commitment done
+        </button>
+      </div>
+    </section>
+  );
 }
 
 function parseSiteList(blob: string): string[] {

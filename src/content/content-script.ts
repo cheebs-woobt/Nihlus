@@ -2,6 +2,7 @@ import {
   isShowBanterMessage,
   type BanterDismissedMessage,
   type RepulseFiredMessage,
+  type ShowBanterMessage,
 } from "../lib/messages.ts";
 import {
   DISMISS_REASONS,
@@ -13,18 +14,12 @@ import {
 // Single instance per page; a fresh ShowBanterMessage replaces the
 // existing overlay rather than stacking.
 //
-// Phase 5 behavior: dismiss is two-step (Dismiss button → 5-chip
-// reason row → close + send reason).
-//
-// Phase 6 calibration:
-//   - Width 440px, 4px left accent border, drop shadow.
-//   - Slide-in animation (280ms) + one-time mount pulse (600ms).
-//   - prefers-reduced-motion: skip slide, 150ms fade.
-//   - Soft 440 Hz chime on mount (if soundEnabled per UserConfig).
-//   - 45-second auto-pulse: if the overlay is still mounted and the
-//     user hasn't mousemoved on the page in the last 5 seconds, play
-//     a single 700ms scale 1.0 → 1.05 → 1.0 pulse and notify the
-//     worker. Single fire only.
+// Phase 6 variants:
+//   - "small":    320 px, condensed padding, neutral border.
+//   - "standard": 440 px, the post-calibration card (purple accent).
+//   - "large":    560 px, 4 px warning border, slightly louder header.
+// All three share the same DOM tree; the variant modifier class
+// switches the styling.
 
 console.log("Nihlus content script active on:", window.location.href);
 
@@ -37,30 +32,42 @@ interface OverlayHandle {
   card: HTMLDivElement;
   banterId: number;
   repulseTimeoutId: number;
-  // Updated by the mousemove listener; read at the 45s mark. A move
-  // within REPULSE_MOUSEMOVE_GRACE_MS of the deadline suppresses the
-  // repulse (user is reading / interacting, not waiting it out).
   lastMoveMs: number;
   onMouseMove: () => void;
+  countdownIntervalId: number | null;
+  countdownEl: HTMLDivElement | null;
 }
 
 let current: OverlayHandle | null = null;
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
   if (!isShowBanterMessage(message)) return;
-  if (current !== null && current.banterId === message.banterId) return;
-  showOverlay(message.message, message.banterId, message.soundEnabled);
+  if (current !== null && current.banterId === message.banterId) {
+    // Same banter id, but the worker may have re-sent it because the
+    // user refreshed mid-countdown — update the countdown display in
+    // place rather than re-mounting (which would replay slide-in and
+    // the chime).
+    updateCountdown(current, message.countdownSeconds);
+    return;
+  }
+  showOverlay(message);
 });
 
-function showOverlay(text: string, banterId: number, soundEnabled: boolean): void {
+function showOverlay(msg: ShowBanterMessage): void {
   removeCurrent();
+
+  const widthByVariant: Record<typeof msg.overlay, string> = {
+    small: "320px",
+    standard: "440px",
+    large: "560px",
+  };
 
   const host = document.createElement("div");
   host.style.all = "initial";
   host.style.position = "fixed";
   host.style.right = "16px";
   host.style.bottom = "16px";
-  host.style.width = "440px";
+  host.style.width = widthByVariant[msg.overlay];
   host.style.zIndex = "2147483647";
   host.setAttribute("data-nihlus-overlay", "true");
 
@@ -71,17 +78,31 @@ function showOverlay(text: string, banterId: number, soundEnabled: boolean): voi
   shadow.appendChild(style);
 
   const card = document.createElement("div");
-  card.className = "nihlus-banter";
+  card.className = `nihlus-banter nihlus-banter--${msg.overlay}`;
 
   const header = document.createElement("div");
   header.className = "nihlus-banter__header";
-  header.textContent = "Nihlus";
+  const headerLabel = document.createElement("span");
+  headerLabel.textContent = "Nihlus";
+  header.appendChild(headerLabel);
+  const headerStars = document.createElement("span");
+  headerStars.className = "nihlus-banter__stars";
+  headerStars.textContent = renderHeaderStars(msg.starLevel);
+  header.appendChild(headerStars);
   card.appendChild(header);
 
-  const msg = document.createElement("p");
-  msg.className = "nihlus-banter__message";
-  msg.textContent = text;
-  card.appendChild(msg);
+  const message = document.createElement("p");
+  message.className = "nihlus-banter__message";
+  message.textContent = msg.message;
+  card.appendChild(message);
+
+  let countdownEl: HTMLDivElement | null = null;
+  if (msg.countdownSeconds !== null) {
+    countdownEl = document.createElement("div");
+    countdownEl.className = "nihlus-banter__countdown";
+    countdownEl.textContent = formatCountdown(msg.countdownSeconds);
+    card.appendChild(countdownEl);
+  }
 
   const actionArea = document.createElement("div");
   actionArea.className = "nihlus-banter__action";
@@ -91,41 +112,83 @@ function showOverlay(text: string, banterId: number, soundEnabled: boolean): voi
   dismissBtn.className = "nihlus-banter__dismiss";
   dismissBtn.textContent = "Dismiss";
   dismissBtn.addEventListener("click", () => {
-    renderChips(actionArea, banterId);
+    renderChips(actionArea, msg.banterId);
   });
   actionArea.appendChild(dismissBtn);
-
   card.appendChild(actionArea);
-  shadow.appendChild(card);
 
+  shadow.appendChild(card);
   (document.body ?? document.documentElement).appendChild(host);
 
-  // Mousemove tracking. Passive so we don't slow scrolling on the
-  // host page. lastMoveMs ticks every move; the timer's check reads
-  // it once.
   const onMouseMove = (): void => {
-    if (current !== null) {
-      current.lastMoveMs = Date.now();
-    }
+    if (current !== null) current.lastMoveMs = Date.now();
   };
   document.addEventListener("mousemove", onMouseMove, { passive: true });
 
   const repulseTimeoutId = window.setTimeout(() => {
-    maybeFireRepulse(banterId);
+    maybeFireRepulse(msg.banterId);
   }, REPULSE_TIMEOUT_MS);
+
+  let countdownIntervalId: number | null = null;
+  if (countdownEl !== null && msg.countdownSeconds !== null) {
+    countdownIntervalId = startCountdownInterval(countdownEl, msg.countdownSeconds);
+  }
 
   current = {
     host,
     card,
-    banterId,
+    banterId: msg.banterId,
     repulseTimeoutId,
     lastMoveMs: Date.now(),
     onMouseMove,
+    countdownIntervalId,
+    countdownEl,
   };
 
-  if (soundEnabled) {
+  if (msg.soundEnabled) {
     playMountChime();
   }
+}
+
+function startCountdownInterval(el: HTMLDivElement, initial: number): number {
+  let remaining = initial;
+  return window.setInterval(() => {
+    remaining = Math.max(0, remaining - 1);
+    el.textContent = formatCountdown(remaining);
+    if (remaining <= 0) {
+      // Worker is about to act (navigate or close). Stop ticking; the
+      // tab navigation will tear down the content script naturally.
+      if (current !== null && current.countdownIntervalId !== null) {
+        window.clearInterval(current.countdownIntervalId);
+        current.countdownIntervalId = null;
+      }
+    }
+  }, 1000);
+}
+
+function updateCountdown(handle: OverlayHandle, seconds: number | null): void {
+  if (seconds === null || handle.countdownEl === null) return;
+  handle.countdownEl.textContent = formatCountdown(seconds);
+  if (handle.countdownIntervalId !== null) {
+    window.clearInterval(handle.countdownIntervalId);
+  }
+  handle.countdownIntervalId = startCountdownInterval(handle.countdownEl, seconds);
+}
+
+function formatCountdown(seconds: number): string {
+  if (seconds <= 0) return "Tab closing now";
+  return `Closing in ${seconds}s`;
+}
+
+function renderHeaderStars(level: number): string {
+  const filled = Math.max(0, Math.min(6, Math.floor(level)));
+  // Use unicode block stars for a tight monospaced look. Empty slots
+  // render as dimmed glyphs.
+  let out = "";
+  for (let i = 0; i < 6; i++) {
+    out += i < filled ? "★" : "☆";
+  }
+  return out;
 }
 
 function renderChips(actionArea: HTMLDivElement, banterId: number): void {
@@ -160,6 +223,9 @@ function renderChips(actionArea: HTMLDivElement, banterId: number): void {
 function removeCurrent(): void {
   if (current === null) return;
   window.clearTimeout(current.repulseTimeoutId);
+  if (current.countdownIntervalId !== null) {
+    window.clearInterval(current.countdownIntervalId);
+  }
   document.removeEventListener("mousemove", current.onMouseMove);
   current.host.remove();
   current = null;
@@ -169,14 +235,9 @@ function maybeFireRepulse(banterId: number): void {
   if (current === null || current.banterId !== banterId) return;
   const movedRecently =
     Date.now() - current.lastMoveMs < REPULSE_MOUSEMOVE_GRACE_MS;
-  if (movedRecently) {
-    // User is interacting elsewhere on the page; skip the pulse.
-    return;
-  }
+  if (movedRecently) return;
   const card = current.card;
   card.classList.add("nihlus-banter--repulse");
-  // Remove the class after the animation completes so it can re-arm
-  // if a future phase ever needs to repulse more than once.
   window.setTimeout(() => {
     card.classList.remove("nihlus-banter--repulse");
   }, REPULSE_ANIMATION_MS + 50);
@@ -185,9 +246,7 @@ function maybeFireRepulse(banterId: number): void {
     type: "nihlus/repulse-fired",
     banterId,
   };
-  void chrome.runtime.sendMessage(out).catch(() => {
-    // Worker may have been torn down; the visual pulse still fired.
-  });
+  void chrome.runtime.sendMessage(out).catch(() => {});
 }
 
 async function notifyDismiss(banterId: number, reason: DismissReason): Promise<void> {
@@ -203,10 +262,6 @@ async function notifyDismiss(banterId: number, reason: DismissReason): Promise<v
   }
 }
 
-// Soft 440 Hz mount chime. AudioContext creation can throw on pages
-// that haven't received a user gesture yet (browser autoplay policy);
-// wrapped in try/catch so a silent failure doesn't disrupt the visual
-// overlay. Envelope: 10ms attack → 100ms hold → 40ms release.
 function playMountChime(): void {
   try {
     const AudioCtor =
@@ -231,8 +286,6 @@ function playMountChime(): void {
 
     osc.start(now);
     osc.stop(now + 0.16);
-    // Close the context shortly after the sound ends so we don't leak
-    // AudioContexts across many banters.
     osc.addEventListener("ended", () => {
       void ctx.close().catch(() => {});
     });
@@ -268,10 +321,10 @@ const OVERLAY_CSS = `
   color: #e6e6e6;
   background: #0e1116;
   border: 1px solid #2a313c;
-  border-left: 4px solid #b388ff;
+  border-left: 4px solid #6ea8ff;
   border-radius: 8px;
-  padding: 18px 21px 21px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  padding: 14px 16px 16px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
   box-sizing: border-box;
   width: 100%;
   transform-origin: bottom right;
@@ -284,6 +337,21 @@ const OVERLAY_CSS = `
     animation: nihlus-fade-in 150ms ease-out;
   }
 }
+.nihlus-banter--small {
+  border-left-color: #6ea8ff;
+  padding: 12px 14px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.nihlus-banter--standard {
+  border-left-color: #b388ff;
+  padding: 18px 21px 21px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+.nihlus-banter--large {
+  border-left: 4px solid #ff7a45;
+  padding: 22px 26px 26px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
 .nihlus-banter--repulse {
   animation: nihlus-repulse 700ms ease-in-out 1;
 }
@@ -293,18 +361,45 @@ const OVERLAY_CSS = `
   }
 }
 .nihlus-banter__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #b388ff;
-  margin-bottom: 10px;
+  color: #6ea8ff;
+  margin-bottom: 8px;
+}
+.nihlus-banter--small .nihlus-banter__header { color: #6ea8ff; font-size: 11px; }
+.nihlus-banter--standard .nihlus-banter__header { color: #b388ff; }
+.nihlus-banter--large .nihlus-banter__header { color: #ff7a45; font-size: 13px; }
+.nihlus-banter__stars {
+  letter-spacing: 0.1em;
+  font-size: 13px;
+  opacity: 0.9;
 }
 .nihlus-banter__message {
-  margin: 0 0 16px;
-  font-size: 16px;
+  margin: 0 0 12px;
+  font-size: 14px;
   line-height: 1.45;
   color: #f3f4f6;
+}
+.nihlus-banter--small .nihlus-banter__message { font-size: 13px; margin-bottom: 10px; }
+.nihlus-banter--standard .nihlus-banter__message { font-size: 16px; margin-bottom: 16px; }
+.nihlus-banter--large .nihlus-banter__message { font-size: 18px; margin-bottom: 18px; }
+.nihlus-banter__countdown {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #ffb37a;
+  margin-bottom: 12px;
+  letter-spacing: 0.02em;
+}
+.nihlus-banter--large .nihlus-banter__countdown {
+  font-size: 14px;
+  color: #ff7a45;
+  font-weight: 600;
 }
 .nihlus-banter__action {
   display: flex;
@@ -317,12 +412,14 @@ const OVERLAY_CSS = `
   color: #9ca3af;
   border: 1px solid #2a313c;
   border-radius: 4px;
-  padding: 7px 14px;
-  font-size: 13px;
+  padding: 6px 12px;
+  font-size: 12px;
   font-family: inherit;
   cursor: pointer;
   align-self: flex-start;
 }
+.nihlus-banter--standard .nihlus-banter__dismiss { padding: 7px 14px; font-size: 13px; }
+.nihlus-banter--large .nihlus-banter__dismiss { padding: 8px 16px; font-size: 14px; }
 .nihlus-banter__dismiss:hover {
   color: #f3f4f6;
   border-color: #4a5263;
