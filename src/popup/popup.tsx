@@ -89,6 +89,11 @@ function Popup(): React.ReactElement {
     markDirty();
   };
 
+  const handleToggleOverlaySound = (): void => {
+    setConfig((prev) => ({ ...prev, overlaySoundEnabled: !prev.overlaySoundEnabled }));
+    markDirty();
+  };
+
   const handleCommitmentHourChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     setConfig((prev) => ({ ...prev, commitmentOfTheHour: e.target.value }));
     markDirty();
@@ -183,6 +188,18 @@ function Popup(): React.ReactElement {
             disabled={!loaded}
           />
           <span>Focus mode</span>
+        </label>
+      </section>
+
+      <section className="nihlus-popup__row">
+        <label className="nihlus-popup__toggle">
+          <input
+            type="checkbox"
+            checked={config.overlaySoundEnabled}
+            onChange={handleToggleOverlaySound}
+            disabled={!loaded}
+          />
+          <span>Overlay sound</span>
         </label>
       </section>
 

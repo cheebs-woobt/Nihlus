@@ -15,6 +15,7 @@ import {
 } from "../lib/llm.ts";
 import {
   isBanterDismissedMessage,
+  isRepulseFiredMessage,
   type ShowBanterMessage,
 } from "../lib/messages.ts";
 import {
@@ -66,6 +67,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
+  if (isRepulseFiredMessage(message)) {
+    const tabId = sender.tab?.id ?? -1;
+    console.log(`Nihlus repulse fired on tab ${tabId} (45s no-action)`);
+    return;
+  }
   if (!isBanterDismissedMessage(message)) return;
   const tabId = sender.tab?.id;
   if (tabId !== undefined) {
@@ -148,14 +154,54 @@ async function maybeSendBanter(tabId: number, url: string): Promise<void> {
     type: "nihlus/show-banter",
     message,
     banterId,
+    soundEnabled: config.overlaySoundEnabled,
   };
 
+  await sendBanterWithRetry(tabId, out, source);
+}
+
+// Issue 1 (race): tabs.onUpdated fires status="complete" before the
+// content script's chrome.runtime.onMessage listener has finished
+// registering on some pages. The send then rejects with "Could not
+// establish connection. Receiving end does not exist." Sleep 250ms
+// and retry once — that interval is enough for the script to finish
+// initializing on every page we've seen this fail on. A second
+// failure is treated as permanent (chrome://, web store, sandboxed
+// iframe, etc.) and logged at debug volume so we don't spam.
+async function sendBanterWithRetry(
+  tabId: number,
+  out: ShowBanterMessage,
+  source: "ai" | "static",
+): Promise<void> {
+  if (await trySend(tabId, out)) {
+    console.debug(`Nihlus sent ${source} banter (id ${out.banterId}) to tab ${tabId}`);
+    return;
+  }
+  await sleep(250);
+  if (await trySend(tabId, out)) {
+    console.debug(
+      `Nihlus sent ${source} banter (id ${out.banterId}) to tab ${tabId} on retry`,
+    );
+    return;
+  }
+  console.debug(
+    `Nihlus banter undeliverable to tab ${tabId} (no content script after retry).`,
+  );
+}
+
+async function trySend(tabId: number, out: ShowBanterMessage): Promise<boolean> {
   try {
     await chrome.tabs.sendMessage(tabId, out);
-    console.debug(`Nihlus sent ${source} banter (id ${banterId}) to tab ${tabId}`);
-  } catch (err) {
-    console.debug(`Nihlus banter send failed for tab ${tabId}:`, err);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 interface BanterChoice {

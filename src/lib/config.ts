@@ -48,6 +48,11 @@ export interface UserConfig {
   // typos can't ship to the request body. Migrated to the default on
   // load if a previously-stored value is no longer in the union.
   claudeModel: ClaudeModelId;
+  // Whether the overlay plays a soft 440 Hz chime on appearance.
+  // Distinct from AI banter: the chime fires for static-pool banter
+  // too. Default true per Wyatt's calibration: appearance should
+  // notice. Toggle in the popup.
+  overlaySoundEnabled: boolean;
 }
 
 const STORAGE_KEY = "userConfig";
@@ -61,6 +66,7 @@ export function defaultUserConfig(): UserConfig {
     claudeApiKey: "",
     aiBanterEnabled: false,
     claudeModel: DEFAULT_CLAUDE_MODEL,
+    overlaySoundEnabled: true,
   };
 }
 
@@ -124,6 +130,10 @@ function sanitizeConfig(raw: unknown): UserConfig {
     aiBanterEnabled:
       typeof o["aiBanterEnabled"] === "boolean" ? o["aiBanterEnabled"] : def.aiBanterEnabled,
     claudeModel: sanitizeModelId(o["claudeModel"]),
+    overlaySoundEnabled:
+      typeof o["overlaySoundEnabled"] === "boolean"
+        ? o["overlaySoundEnabled"]
+        : def.overlaySoundEnabled,
   };
 }
 
