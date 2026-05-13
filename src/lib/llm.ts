@@ -14,8 +14,13 @@ export type TimeOfDay = "morning" | "afternoon" | "evening" | "late-night";
 export interface BanterContext {
   // Full URL of the page the user landed on.
   url: string;
-  // The user's stated commitment-of-the-hour. Empty string when unset
-  // so the prompt can render "(none set)" rather than an awkward gap.
+  // The user's stated commitment for today. Higher-priority anchor for
+  // the model than commitmentOfTheHour because it's the broader frame
+  // ("ship the migration plan today") and changes less often. Empty
+  // string when unset.
+  commitmentOfTheDay: string;
+  // The user's stated commitment-of-the-hour. Optional sub-anchor when
+  // the user has set a tighter focus window. Empty string when unset.
   commitmentOfTheHour: string;
   // Count of dismissals already logged today. Drives the tone gradient
   // (gentle → direct → blunt) the model is asked to apply.
@@ -66,7 +71,12 @@ const SYSTEM_PROMPT = [
   "Specific over abstract. Pointed but kind. Short.",
   "",
   "Output a SINGLE banter line. One sentence, 8 to 22 words. No prefix, no quotes, no emoji.",
-  "Reference the user's stated commitment if it is set; otherwise reference the page or pattern.",
+  "Priority for what to reference, in order:",
+  "  1. The user's commitment-of-the-day (broad frame). Call back to it when drift is obvious.",
+  "  2. The user's commitment-of-the-hour, if set (tighter window).",
+  "  3. The page itself or the recent-dismissed-sites pattern.",
+  "When neither commitment is set, never invent one; reference the page or the pattern.",
+  "",
   "Vary tone with the dismissal count provided:",
   "  - 0 to 2 dismissals today: gentle observation, almost casual.",
   "  - 3 to 5: more direct. Name the pattern.",
@@ -166,7 +176,11 @@ export async function generateBanter(
 }
 
 function buildUserPrompt(context: BanterContext): string {
-  const commitment =
+  const commitmentDay =
+    context.commitmentOfTheDay.trim().length > 0
+      ? context.commitmentOfTheDay.trim()
+      : "(none set)";
+  const commitmentHour =
     context.commitmentOfTheHour.trim().length > 0
       ? context.commitmentOfTheHour.trim()
       : "(none set)";
@@ -181,7 +195,8 @@ function buildUserPrompt(context: BanterContext): string {
 
   return [
     `Current URL: ${context.url}`,
-    `Commitment this hour: ${commitment}`,
+    `Commitment for today: ${commitmentDay}`,
+    `Commitment this hour: ${commitmentHour}`,
     `Dismissals today: ${context.dismissalCountToday}`,
     `Time of day: ${context.timeOfDay}`,
     `Recently dismissed sites today: ${dismissedSites}`,

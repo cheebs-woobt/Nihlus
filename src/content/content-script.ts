@@ -2,11 +2,20 @@ import {
   isShowBanterMessage,
   type BanterDismissedMessage,
 } from "../lib/messages.ts";
+import {
+  DISMISS_REASONS,
+  type DismissReason,
+} from "../lib/session-state.ts";
 
 // Page-injected banter overlay. Lives in a closed shadow DOM so the
 // host page's CSS can't restyle it and the host's JS can't query it.
-// Single instance per page: a new ShowBanterMessage replaces the
+// Single instance per page; a fresh ShowBanterMessage replaces the
 // existing overlay rather than stacking.
+//
+// Phase 5: dismiss is two-step. The single "Dismiss" button is replaced
+// after click by a reason chip row (break / work / stuck / tired /
+// later). The chip click is the actual dismissal and carries the
+// reason on the wire so the worker can log it.
 
 console.log("Nihlus content script active on:", window.location.href);
 
@@ -20,7 +29,8 @@ let current: OverlayHandle | null = null;
 chrome.runtime.onMessage.addListener((message: unknown) => {
   if (!isShowBanterMessage(message)) return;
   // Defensive: a duplicate show for the same banterId is a no-op so a
-  // background re-send (e.g. SPA route flip) doesn't visually re-mount.
+  // background re-send (e.g. SPA route flip) doesn't visually re-mount
+  // and reset the user's progress through the dismiss flow.
   if (current !== null && current.banterId === message.banterId) return;
   showOverlay(message.message, message.banterId);
 });
@@ -29,16 +39,11 @@ function showOverlay(text: string, banterId: number): void {
   removeCurrent();
 
   const host = document.createElement("div");
-  // Reset every property the host page might have set inheritably, so
-  // the overlay starts from a known baseline. The shadow root below
-  // isolates the rest of the styling.
   host.style.all = "initial";
   host.style.position = "fixed";
   host.style.right = "16px";
   host.style.bottom = "16px";
   host.style.width = "280px";
-  // Maximum 32-bit signed int; outranks every reasonable host overlay
-  // (including chat widgets that camp at 2_000_000_000).
   host.style.zIndex = "2147483647";
   host.setAttribute("data-nihlus-overlay", "true");
 
@@ -61,15 +66,21 @@ function showOverlay(text: string, banterId: number): void {
   msg.textContent = text;
   card.appendChild(msg);
 
-  const dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.className = "nihlus-banter__dismiss";
-  dismiss.textContent = "Dismiss";
-  dismiss.addEventListener("click", () => {
-    void notifyDismiss(banterId);
-    removeCurrent();
+  // Action area: starts in "dismiss" state (single button); flips to
+  // "chips" state on first click. The chip click is the real dismissal.
+  const actionArea = document.createElement("div");
+  actionArea.className = "nihlus-banter__action";
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.className = "nihlus-banter__dismiss";
+  dismissBtn.textContent = "Dismiss";
+  dismissBtn.addEventListener("click", () => {
+    renderChips(actionArea, banterId);
   });
-  card.appendChild(dismiss);
+  actionArea.appendChild(dismissBtn);
+
+  card.appendChild(actionArea);
 
   shadow.appendChild(card);
 
@@ -82,22 +93,51 @@ function showOverlay(text: string, banterId: number): void {
   current = { host, banterId };
 }
 
+function renderChips(actionArea: HTMLDivElement, banterId: number): void {
+  // Empty the action area and re-render as chips.
+  while (actionArea.firstChild !== null) {
+    actionArea.removeChild(actionArea.firstChild);
+  }
+
+  const prompt = document.createElement("div");
+  prompt.className = "nihlus-banter__prompt";
+  prompt.textContent = "Why? Pick one:";
+  actionArea.appendChild(prompt);
+
+  const chipRow = document.createElement("div");
+  chipRow.className = "nihlus-banter__chips";
+
+  for (const reason of DISMISS_REASONS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "nihlus-banter__chip";
+    chip.textContent = reason;
+    chip.dataset["reason"] = reason;
+    chip.addEventListener("click", () => {
+      void notifyDismiss(banterId, reason);
+      removeCurrent();
+    });
+    chipRow.appendChild(chip);
+  }
+
+  actionArea.appendChild(chipRow);
+}
+
 function removeCurrent(): void {
   if (current === null) return;
   current.host.remove();
   current = null;
 }
 
-async function notifyDismiss(banterId: number): Promise<void> {
+async function notifyDismiss(banterId: number, reason: DismissReason): Promise<void> {
   const message: BanterDismissedMessage = {
     type: "nihlus/banter-dismissed",
     banterId,
+    reason,
   };
   try {
     await chrome.runtime.sendMessage(message);
   } catch (err) {
-    // Worker may be in the middle of being unloaded; the cooldown is
-    // best-effort. Logged at debug so we don't pollute the console.
     console.debug("Nihlus dismiss notify failed:", err);
   }
 }
@@ -131,6 +171,11 @@ const OVERLAY_CSS = `
   line-height: 1.4;
   color: #f3f4f6;
 }
+.nihlus-banter__action {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .nihlus-banter__dismiss {
   appearance: none;
   background: transparent;
@@ -141,12 +186,45 @@ const OVERLAY_CSS = `
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
+  align-self: flex-start;
 }
 .nihlus-banter__dismiss:hover {
   color: #f3f4f6;
   border-color: #4a5263;
 }
 .nihlus-banter__dismiss:focus-visible {
+  outline: 2px solid #6ea8ff;
+  outline-offset: 2px;
+}
+.nihlus-banter__prompt {
+  font-size: 11px;
+  color: #9ca3af;
+  letter-spacing: 0.02em;
+}
+.nihlus-banter__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.nihlus-banter__chip {
+  appearance: none;
+  background: #161a21;
+  color: #cbd5e1;
+  border: 1px solid #2a313c;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.nihlus-banter__chip:hover {
+  background: #1c2129;
+  color: #f3f4f6;
+  border-color: #4a5263;
+}
+.nihlus-banter__chip:focus-visible {
   outline: 2px solid #6ea8ff;
   outline-offset: 2px;
 }

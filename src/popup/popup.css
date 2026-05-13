@@ -137,3 +137,123 @@ body {
   outline: none;
   border-color: #6ea8ff;
 }
+
+.nihlus-popup__banner {
+  background: #1a2333;
+  border: 1px solid #2c4063;
+  border-left: 3px solid #6ea8ff;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.nihlus-popup__banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nihlus-popup__banner-text {
+  font-size: 12px;
+  color: #d8e3f7;
+}
+
+.nihlus-popup__banner-close {
+  background: transparent;
+  border: none;
+  color: #6b7e9a;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.nihlus-popup__banner-close:hover {
+  color: #d8e3f7;
+}
+
+.nihlus-popup__row-inline {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.nihlus-popup__row-inline input[type="text"] {
+  flex: 1 1 auto;
+  background: #161a21;
+  color: #e6e6e6;
+  border: 1px solid #2a313c;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.nihlus-popup__row-inline input[type="text"]:focus {
+  outline: none;
+  border-color: #6ea8ff;
+}
+
+.nihlus-popup__inline-btn {
+  background: #2a313c;
+  color: #e6e6e6;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.nihlus-popup__inline-btn:hover:not(:disabled) {
+  background: #3a414a;
+}
+
+.nihlus-popup__inline-btn:disabled {
+  background: #1c2129;
+  color: #6b7280;
+  cursor: default;
+}
+
+.nihlus-popup__stats {
+  background: #12161c;
+  border: 1px solid #1f242c;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nihlus-popup__stats--placeholder {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  margin: 0;
+}
+
+.nihlus-popup__stats-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.nihlus-popup__stats-label {
+  flex: 0 0 auto;
+  width: 70px;
+  color: #6b7280;
+  letter-spacing: 0.04em;
+}
+
+.nihlus-popup__stats-value {
+  flex: 1 1 auto;
+  color: #cbd5e1;
+  word-break: break-word;
+}

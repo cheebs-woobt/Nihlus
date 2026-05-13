@@ -9,31 +9,48 @@ import {
   type ClaudeModelId,
   type UserConfig,
 } from "../lib/config.ts";
+import {
+  countByReasonToday,
+  countDismissalsToday,
+  defaultSessionState,
+  DISMISS_REASONS,
+  getSessionState,
+  markCommitmentPromptSkippedToday,
+  setCommitmentOfTheDay,
+  subscribeSessionState,
+  topDismissedSitesThisWeek,
+  type DismissReason,
+  type SessionState,
+} from "../lib/session-state.ts";
 import "./popup.css";
 
-// Save-button state. "idle" is the default. "saving" briefly while the
-// chrome.storage write is in flight. "saved" for ~1.2 seconds after a
-// successful save so the user sees confirmation; resets to "idle" on
-// any field edit afterwards.
 type SaveState = "idle" | "saving" | "saved";
 
 function Popup(): React.ReactElement {
   const [config, setConfig] = useState<UserConfig>(defaultUserConfig);
+  const [session, setSession] = useState<SessionState>(defaultSessionState);
   const [allowedText, setAllowedText] = useState<string>("");
   const [blockedText, setBlockedText] = useState<string>("");
+  // Local-only buffer for the day commitment input so a half-typed
+  // value doesn't write to storage on every keystroke. Persisted by
+  // the inline Set button or by the main Save button.
+  const [dayCommitmentDraft, setDayCommitmentDraft] = useState<string>("");
   const [loaded, setLoaded] = useState<boolean>(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
-  // Initial load. The popup is recreated every time the user clicks the
-  // toolbar icon so this effect runs exactly once per popup lifetime.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const initial = await loadConfig();
+      const [initialConfig, initialSession] = await Promise.all([
+        loadConfig(),
+        getSessionState(),
+      ]);
       if (cancelled) return;
-      setConfig(initial);
-      setAllowedText(initial.allowedSites.join("\n"));
-      setBlockedText(initial.blockedSites.join("\n"));
+      setConfig(initialConfig);
+      setSession(initialSession);
+      setAllowedText(initialConfig.allowedSites.join("\n"));
+      setBlockedText(initialConfig.blockedSites.join("\n"));
+      setDayCommitmentDraft(initialSession.commitmentOfTheDay);
       setLoaded(true);
     })();
     return () => {
@@ -41,17 +58,27 @@ function Popup(): React.ReactElement {
     };
   }, []);
 
-  // Stay in sync with storage changes from other surfaces (e.g. the
-  // service worker writing defaults on install). Without this the popup
-  // would display stale state if a user opens it right after install.
   useEffect(() => {
-    const unsubscribe = subscribeConfig((next) => {
+    const unsubscribeConfig = subscribeConfig((next) => {
       setConfig(next);
       setAllowedText(next.allowedSites.join("\n"));
       setBlockedText(next.blockedSites.join("\n"));
     });
-    return unsubscribe;
-  }, []);
+    const unsubscribeSession = subscribeSessionState((next) => {
+      setSession(next);
+      // Pull the new commitment into the draft buffer only if the user
+      // hasn't started typing a different value. We detect this by
+      // checking equality against the previous saved value; if the
+      // draft was equal to the saved string, the user wasn't editing.
+      setDayCommitmentDraft((cur) =>
+        cur === session.commitmentOfTheDay ? next.commitmentOfTheDay : cur,
+      );
+    });
+    return () => {
+      unsubscribeConfig();
+      unsubscribeSession();
+    };
+  }, [session.commitmentOfTheDay]);
 
   const markDirty = (): void => {
     if (saveState === "saved") setSaveState("idle");
@@ -62,9 +89,23 @@ function Popup(): React.ReactElement {
     markDirty();
   };
 
-  const handleCommitmentChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+  const handleCommitmentHourChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     setConfig((prev) => ({ ...prev, commitmentOfTheHour: e.target.value }));
     markDirty();
+  };
+
+  const handleDayCommitmentChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    setDayCommitmentDraft(e.target.value);
+  };
+
+  const handleSetDayCommitment = async (): Promise<void> => {
+    const next = await setCommitmentOfTheDay(dayCommitmentDraft.trim());
+    setSession(next);
+  };
+
+  const handleSkipPrompt = async (): Promise<void> => {
+    const next = await markCommitmentPromptSkippedToday();
+    setSession(next);
   };
 
   const handleAllowedChange = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
@@ -83,8 +124,6 @@ function Popup(): React.ReactElement {
   };
 
   const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
-    // The select only renders options from CLAUDE_MODEL_OPTIONS, so the
-    // narrow is sound: e.target.value is always a member of the union.
     const v = e.target.value as ClaudeModelId;
     setConfig((prev) => ({ ...prev, claudeModel: v }));
     markDirty();
@@ -104,8 +143,6 @@ function Popup(): React.ReactElement {
     };
     try {
       await saveConfig(next);
-      // Reflect the sanitized lists back into the textareas so a user
-      // who typed duplicates or blank lines sees them collapse on save.
       setConfig(next);
       setAllowedText(next.allowedSites.join("\n"));
       setBlockedText(next.blockedSites.join("\n"));
@@ -118,6 +155,15 @@ function Popup(): React.ReactElement {
       setSaveState("idle");
     }
   };
+
+  // Banner appears when focus mode is on AND the user has not yet set
+  // OR explicitly skipped today's commitment. After either action it
+  // stays hidden for the rest of the day per session-state flags.
+  const showCommitmentBanner =
+    loaded &&
+    config.focusModeActive &&
+    session.commitmentOfTheDay.trim().length === 0 &&
+    session.commitmentPromptSkippedDate !== todayIsoDateString();
 
   return (
     <div className="nihlus-popup">
@@ -140,16 +186,67 @@ function Popup(): React.ReactElement {
         </label>
       </section>
 
+      {showCommitmentBanner ? (
+        <section className="nihlus-popup__banner">
+          <div className="nihlus-popup__banner-row">
+            <span className="nihlus-popup__banner-text">
+              What are you working on today?
+            </span>
+            <button
+              type="button"
+              className="nihlus-popup__banner-close"
+              aria-label="Dismiss this prompt for today"
+              onClick={() => {
+                void handleSkipPrompt();
+              }}
+            >
+              x
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="nihlus-popup__field">
+        <label htmlFor="day-commit" className="nihlus-popup__label">
+          Today's commitment{" "}
+          <span className="nihlus-popup__hint">(broad frame for the day)</span>
+        </label>
+        <div className="nihlus-popup__row-inline">
+          <input
+            id="day-commit"
+            type="text"
+            value={dayCommitmentDraft}
+            onChange={handleDayCommitmentChange}
+            placeholder="e.g. ship the migration plan"
+            disabled={!loaded}
+          />
+          <button
+            type="button"
+            className="nihlus-popup__inline-btn"
+            onClick={() => {
+              void handleSetDayCommitment();
+            }}
+            disabled={
+              !loaded || dayCommitmentDraft.trim() === session.commitmentOfTheDay.trim()
+            }
+          >
+            Set
+          </button>
+        </div>
+      </section>
+
+      <PatternSurface session={session} loaded={loaded} />
+
       <section className="nihlus-popup__field">
         <label htmlFor="commitment" className="nihlus-popup__label">
-          Commitment of the hour
+          Commitment of the hour <span className="nihlus-popup__hint">(optional)</span>
         </label>
         <input
           id="commitment"
           type="text"
           value={config.commitmentOfTheHour}
-          onChange={handleCommitmentChange}
-          placeholder="e.g. finish the migration plan"
+          onChange={handleCommitmentHourChange}
+          placeholder="e.g. finish section 3 of the doc"
           disabled={!loaded}
         />
       </section>
@@ -251,17 +348,60 @@ function Popup(): React.ReactElement {
   );
 }
 
+interface PatternSurfaceProps {
+  session: SessionState;
+  loaded: boolean;
+}
+
+// Read-only self-awareness panel. "Today" surfaces dismissal counts
+// per reason (sorted desc, skipping zeros). "This week" surfaces the
+// top 3 hostnames over the last 7 rolling days. No edits in Phase 5.
+function PatternSurface({ session, loaded }: PatternSurfaceProps): React.ReactElement {
+  if (!loaded) {
+    return <section className="nihlus-popup__stats nihlus-popup__stats--placeholder" />;
+  }
+
+  const todayCount = countDismissalsToday(session);
+  const todayByReason = countByReasonToday(session);
+  const topSites = topDismissedSitesThisWeek(session, 3);
+
+  const todayLine =
+    todayCount === 0
+      ? "no dismissals yet"
+      : DISMISS_REASONS.map<{ reason: DismissReason; count: number }>((r) => ({
+          reason: r,
+          count: todayByReason[r],
+        }))
+          .filter((x) => x.count > 0)
+          .sort((a, b) => b.count - a.count)
+          .map((x) => `${x.reason} ${x.count}`)
+          .join(", ");
+
+  const weekLine =
+    topSites.length === 0
+      ? "no dismissals this week"
+      : topSites.map((s) => `${s.hostname} (${s.count})`).join(", ");
+
+  return (
+    <section className="nihlus-popup__stats">
+      <div className="nihlus-popup__stats-row">
+        <span className="nihlus-popup__stats-label">Today</span>
+        <span className="nihlus-popup__stats-value">{todayLine}</span>
+      </div>
+      <div className="nihlus-popup__stats-row">
+        <span className="nihlus-popup__stats-label">This week</span>
+        <span className="nihlus-popup__stats-value">{weekLine}</span>
+      </div>
+    </section>
+  );
+}
+
 function saveButtonLabel(state: SaveState): string {
   if (state === "saving") return "Saving...";
   if (state === "saved") return "Saved";
   return "Save";
 }
 
-// Split a textarea blob into a list of normalized entries. Same shape
-// as the sanitizer in config.ts but lives here too so the popup can
-// preview the sanitized list without waiting on a chrome.storage round
-// trip. config.ts's sanitizeSiteList re-runs server-side as a safety
-// net, so any divergence collapses on read.
 function parseSiteList(blob: string): string[] {
   const out: string[] = [];
   for (const line of blob.split(/\r?\n/)) {
@@ -271,6 +411,14 @@ function parseSiteList(blob: string): string[] {
     out.push(cleaned);
   }
   return out;
+}
+
+function todayIsoDateString(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 const rootEl = document.getElementById("root");

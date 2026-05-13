@@ -18,8 +18,9 @@ import {
   type ShowBanterMessage,
 } from "../lib/messages.ts";
 import {
+  countDismissalsToday,
   getSessionState,
-  incrementDismissals,
+  recordDismissal,
 } from "../lib/session-state.ts";
 
 // MV3 service worker. Phase 4 responsibilities (additive over Phase 3):
@@ -70,15 +71,22 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (tabId !== undefined) {
     tabCooldownExpiresAt.set(tabId, Date.now() + COOLDOWN_MS);
   }
-  // Resolve the hostname the user was on when they dismissed so the
-  // next AI prompt can call back to a pattern. lastBanterUrlByTab is
-  // the URL we displayed banter for; falls back to null silently.
-  const url = tabId !== undefined ? lastBanterUrlByTab.get(tabId) ?? null : null;
-  const hostname = url !== null ? extractHostname(url) : null;
-  void incrementDismissals(hostname).then((state) => {
+  // Resolve the URL the user was on when they dismissed so we can
+  // record a complete entry. lastBanterUrlByTab is what we displayed
+  // banter for; falls back to "" silently when the tab record is gone
+  // (e.g. tab closed mid-dismissal).
+  const url = tabId !== undefined ? lastBanterUrlByTab.get(tabId) ?? "" : "";
+  const hostname = url.length > 0 ? extractHostname(url) ?? "" : "";
+  void recordDismissal({
+    banterId: message.banterId,
+    url,
+    hostname,
+    reason: message.reason,
+  }).then((state) => {
+    const todayCount = countDismissalsToday(state);
     console.log(
-      `Nihlus banter dismissed (id ${message.banterId}). Today: ${state.sessionDismissals} dismissals, ` +
-        `recent sites: ${state.recentlyDismissedSites.slice(0, 3).join(", ") || "(none)"}`,
+      `Nihlus banter dismissed (${message.reason}, id ${message.banterId}). ` +
+        `Today: ${todayCount} dismissals.`,
     );
   });
 });
@@ -166,8 +174,9 @@ async function pickAnyBanter(config: UserConfig, url: string): Promise<BanterCho
     const session = await getSessionState();
     const ctx: BanterContext = {
       url,
+      commitmentOfTheDay: session.commitmentOfTheDay,
       commitmentOfTheHour: config.commitmentOfTheHour,
-      dismissalCountToday: session.sessionDismissals,
+      dismissalCountToday: countDismissalsToday(session),
       timeOfDay: deriveTimeOfDay(),
       recentlyDismissedSites: session.recentlyDismissedSites,
       recentBanters: recentAiBanters,

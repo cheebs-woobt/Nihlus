@@ -4,6 +4,8 @@
 // page, popup → content) can't crash the consumer with an unchecked
 // access.
 
+import type { DismissReason } from "./session-state.ts";
+
 export interface ShowBanterMessage {
   type: "nihlus/show-banter";
   message: string;
@@ -16,6 +18,10 @@ export interface ShowBanterMessage {
 export interface BanterDismissedMessage {
   type: "nihlus/banter-dismissed";
   banterId: number;
+  // Phase 5: the one-word category the user tagged the dismissal with.
+  // Required, not optional — there is no single-click dismissal path
+  // anymore.
+  reason: DismissReason;
 }
 
 export type FromBackgroundMessage = ShowBanterMessage;
@@ -34,5 +40,8 @@ export function isShowBanterMessage(m: unknown): m is ShowBanterMessage {
 export function isBanterDismissedMessage(m: unknown): m is BanterDismissedMessage {
   if (typeof m !== "object" || m === null) return false;
   const o = m as Record<string, unknown>;
-  return o["type"] === "nihlus/banter-dismissed" && typeof o["banterId"] === "number";
+  if (o["type"] !== "nihlus/banter-dismissed") return false;
+  if (typeof o["banterId"] !== "number") return false;
+  const r = o["reason"];
+  return r === "break" || r === "work" || r === "stuck" || r === "tired" || r === "later";
 }
